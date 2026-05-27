@@ -55,7 +55,7 @@ def run(spec_file: str, dry_run: bool, show_diff: bool, output_json: bool) -> No
 
     # Apply CLI flag — CLI --dry-run overrides spec value
     if dry_run:
-        spec.dry_run = True
+        spec = spec.model_copy(update={"dry_run": True})
 
     # Execute
     result = execute(spec)

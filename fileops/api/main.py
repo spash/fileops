@@ -54,7 +54,7 @@ def dry_run_batch(spec: BatchSpec) -> BatchResult:
 
 def _run(spec: BatchSpec, force_dry_run: bool) -> BatchResult:
     if force_dry_run:
-        spec.dry_run = True
+        spec = spec.model_copy(update={"dry_run": True})
 
     try:
         result: BatchResult = execute(spec)

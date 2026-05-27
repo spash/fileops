@@ -63,7 +63,7 @@ class _Executor:
             return BatchResult(
                 success=False,
                 results=[],
-                rolled_back=True,
+                rolled_back=False,
                 error=f"Preparation failed: {exc}",
             )
 
@@ -103,20 +103,24 @@ class _Executor:
     def _prepare(self, op: FileOperation) -> _Pending:
         p = _Pending(operation=op)
         path = op.path
-        abs_path = os.path.abspath(path)
-        dir_path = os.path.dirname(abs_path)
 
-        os.makedirs(dir_path, exist_ok=True)
-
-        if op.type in (OperationType.CREATE, OperationType.WRITE):
-            # Compute diff before writing so we capture the before state
+        if op.type == OperationType.CREATE:
+            if os.path.exists(path):
+                raise FileExistsError(f"Cannot create: {path!r} already exists")
+            dir_path = os.path.dirname(os.path.abspath(path))
+            os.makedirs(dir_path, exist_ok=True)
             p.diff = compute_diff(op)
+            fd, temp = tempfile.mkstemp(dir=dir_path, prefix=".fileops_tmp_")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(op.content or "")
+            p.temp_path = temp
 
-            # Back up existing file (if any) so rollback can restore it
+        elif op.type == OperationType.WRITE:
+            dir_path = os.path.dirname(os.path.abspath(path))
+            os.makedirs(dir_path, exist_ok=True)
+            p.diff = compute_diff(op)
             if os.path.exists(path):
                 p.backup_path = self._make_backup(path, dir_path)
-
-            # Stage new content in a temp file on the same filesystem
             fd, temp = tempfile.mkstemp(dir=dir_path, prefix=".fileops_tmp_")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(op.content or "")
@@ -125,6 +129,7 @@ class _Executor:
         elif op.type == OperationType.DELETE:
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Cannot delete non-existent path: {path!r}")
+            dir_path = os.path.dirname(os.path.abspath(path))
             p.diff = compute_diff(op)
             p.backup_path = self._make_backup(path, dir_path)
 
@@ -136,7 +141,6 @@ class _Executor:
                 raise ExecutorStateError("destination missing")
             dest_dir = os.path.dirname(os.path.abspath(dest))
             os.makedirs(dest_dir, exist_ok=True)
-            # Back up destination if it exists
             if os.path.exists(dest):
                 p.backup_path = self._make_backup(dest, dest_dir)
 

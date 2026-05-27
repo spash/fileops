@@ -104,7 +104,8 @@ class TestDelete(unittest.TestCase):
     def test_delete_nonexistent_fails(self):
         result = execute(spec(op_delete(self.path("nope.txt"))))
         self.assertFalse(result.success)
-        self.assertTrue(result.rolled_back)
+        # Fails in prepare — nothing was committed, so rolled_back is False
+        self.assertFalse(result.rolled_back)
 
 
 class TestMove(unittest.TestCase):
@@ -208,20 +209,22 @@ class TestRollback(unittest.TestCase):
         Path(a).write_text("a_original")
         result = execute(spec(
             op_write(a, "a_new"),
-            op_delete(self.path("nope.txt")),  # will fail
+            op_delete(self.path("nope.txt")),  # fails in prepare
         ))
         self.assertFalse(result.success)
-        self.assertTrue(result.rolled_back)
+        # Fails in prepare — nothing committed, so rolled_back is False
+        self.assertFalse(result.rolled_back)
         self.assertEqual(Path(a).read_text(), "a_original")
 
     def test_rollback_removes_newly_created_file(self):
         new_file = self.path("new.txt")
         result = execute(spec(
             op_create(new_file, "new content"),
-            op_delete(self.path("nope.txt")),  # will fail
+            op_delete(self.path("nope.txt")),  # fails in prepare
         ))
         self.assertFalse(result.success)
-        self.assertTrue(result.rolled_back)
+        # Fails in prepare — nothing committed, so rolled_back is False
+        self.assertFalse(result.rolled_back)
         self.assertFalse(os.path.exists(new_file))
 
 
