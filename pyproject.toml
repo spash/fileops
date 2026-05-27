@@ -9,11 +9,11 @@ description = "Atomic batch file operations for AI agent workflows"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = []
+dependencies = ["pydantic>=2.0"]
 
 [project.optional-dependencies]
 cli = ["click>=8.1"]
-api = ["fastapi>=0.111", "uvicorn[standard]>=0.29", "pydantic>=2.0"]
+api = ["fastapi>=0.111", "uvicorn[standard]>=0.29"]
 yaml = ["pyyaml>=6.0"]
 all = ["fileops[cli,api,yaml]"]
 dev = ["ruff>=0.4"]
