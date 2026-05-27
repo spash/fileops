@@ -333,7 +333,9 @@ fileops/
 Core has no external dependencies beyond the Python stdlib. Click, FastAPI, and PyYAML are optional; the library works without them.
 
 ---
+Extracted from an internal project. Core logic is unchanged; the original included a UI diff previewer that didn’t make sense as a standalone tool.
 
+---
 ## License
 
 MIT
