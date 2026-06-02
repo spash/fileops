@@ -11,7 +11,6 @@ from pathlib import Path
 from fileops.core import execute
 from fileops.core.models import BatchSpec, FileOperation, OperationType
 
-
 # ── Helpers (duplicated from test_executor to keep this file self-contained) ──
 
 def spec(*ops, dry_run=False):
@@ -209,7 +208,7 @@ class TestMoveWithExistingDestination(unittest.TestCase):
         self.assertEqual(Path(dst).read_text(), "src content")
 
     def test_move_with_existing_dest_prepare_failure_leaves_both_untouched(self):
-        """If batch fails in prepare (MOVE itself prepared OK, next op fails), both files untouched."""
+        """If batch fails in prepare (MOVE prepared OK, next op fails), both files untouched."""
         src = self.path("src.txt")
         dst = self.path("dst.txt")
         Path(src).write_text("src content")

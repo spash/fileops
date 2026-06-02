@@ -48,6 +48,25 @@ def compute_diff(op: FileOperation) -> Optional[str]:
     return "".join(diff) if diff else None
 
 
+def diff_strings(path: str, before: str, after: str) -> Optional[str]:
+    """
+    Compute a unified diff between two in-memory strings for ``path``.
+
+    Used by operations (EDIT, INSERT) that derive their new content from the
+    existing file rather than receiving it whole, so the diff is built from the
+    before/after the executor already holds — no second read, no re-applied edit.
+    """
+    diff = list(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+    )
+    return "".join(diff) if diff else None
+
+
 def _deletion_diff(path: str) -> Optional[str]:
     if not os.path.exists(path):
         return None

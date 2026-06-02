@@ -44,6 +44,26 @@ class TestLoadFromDict(unittest.TestCase):
         self.assertEqual(op.type, OperationType.MOVE)
         self.assertEqual(op.destination, "new.py")
 
+    def test_edit_parsed(self):
+        raw = {"operations": [{
+            "type": "edit", "path": "x.py",
+            "old_string": "a", "new_string": "b", "replace_all": True,
+        }]}
+        op = load_spec(raw).operations[0]
+        self.assertEqual(op.type, OperationType.EDIT)
+        self.assertEqual(op.old_string, "a")
+        self.assertEqual(op.new_string, "b")
+        self.assertTrue(op.replace_all)
+
+    def test_insert_parsed(self):
+        raw = {"operations": [{
+            "type": "insert", "path": "x.html",
+            "anchor": "</div>", "position": "before", "content": "<a/>",
+        }]}
+        op = load_spec(raw).operations[0]
+        self.assertEqual(op.type, OperationType.INSERT)
+        self.assertEqual(op.position, "before")
+
 
 class TestLoadFromJSON(unittest.TestCase):
     def test_from_string(self):
@@ -86,6 +106,23 @@ class TestValidationErrors(unittest.TestCase):
     def test_move_missing_destination(self):
         with self.assertRaises(ValueError):
             load_spec({"operations": [{"type": "move", "path": "x.txt"}]})
+
+    def test_edit_missing_strings(self):
+        with self.assertRaises(ValueError):
+            load_spec({"operations": [{"type": "edit", "path": "x.txt", "old_string": "a"}]})
+
+    def test_edit_noop_rejected(self):
+        with self.assertRaises(ValueError):
+            load_spec({"operations": [
+                {"type": "edit", "path": "x.txt", "old_string": "a", "new_string": "a"}
+            ]})
+
+    def test_insert_bad_position(self):
+        with self.assertRaises(ValueError):
+            load_spec({"operations": [
+                {"type": "insert", "path": "x.txt", "anchor": "a",
+                 "position": "sideways", "content": "c"}
+            ]})
 
     def test_unknown_fields_rejected(self):
         with self.assertRaises(ValueError):

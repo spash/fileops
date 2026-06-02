@@ -22,7 +22,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Optional
 
-from .differ import compute_diff
+from .differ import compute_diff, diff_strings
 from .exceptions import ExecutorStateError, RollbackFailedWarning
 from .models import BatchResult, BatchSpec, FileOperation, OperationResult, OperationType
 
@@ -50,6 +50,13 @@ def execute(spec: BatchSpec) -> BatchResult:
 
 
 class _Executor:
+    def __init__(self) -> None:
+        # In-batch working copy of file text, keyed by absolute path. Lets
+        # successive EDIT/INSERT ops on the same file compose, instead of each
+        # rebuilding from the (unchanging) on-disk snapshot and clobbering the
+        # prior op at commit time (last os.replace() would otherwise win).
+        self._working: dict[str, str] = {}
+
     def run(self, spec: BatchSpec) -> BatchResult:
         pending: list[_Pending] = []
 
@@ -126,6 +133,26 @@ class _Executor:
                 f.write(op.content or "")
             p.temp_path = temp
 
+        elif op.type in (OperationType.EDIT, OperationType.INSERT):
+            # EDIT/INSERT derive new content from the existing file, then ride
+            # the same temp-file + os.replace() staging path as WRITE.
+            abspath = os.path.abspath(path)
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Cannot edit non-existent path: {path!r}")
+            dir_path = os.path.dirname(abspath)
+            # Build on this batch's prior edits to the same file, if any.
+            before = self._working[abspath] if abspath in self._working else self._read_text(path)
+            after = self._apply_string_op(op, before)
+            p.diff = diff_strings(path, before, after)
+            self._working[abspath] = after
+            # Each op backs up the on-disk original (unchanged during prepare),
+            # so rollback restores the original regardless of commit order.
+            p.backup_path = self._make_backup(path, dir_path)
+            fd, temp = tempfile.mkstemp(dir=dir_path, prefix=".fileops_tmp_")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(after)
+            p.temp_path = temp
+
         elif op.type == OperationType.DELETE:
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Cannot delete non-existent path: {path!r}")
@@ -152,11 +179,55 @@ class _Executor:
         shutil.copy2(path, backup)
         return backup
 
+    def _read_text(self, path: str) -> str:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except UnicodeDecodeError:
+            raise ValueError(f"Cannot edit {path!r}: file contains non-UTF-8 content")
+
+    def _apply_string_op(self, op: FileOperation, text: str) -> str:
+        """Apply an EDIT or INSERT to ``text``, enforcing exact-match rules."""
+        if op.type == OperationType.EDIT:
+            old = op.old_string
+            new = op.new_string
+            if old is None or new is None:
+                raise ExecutorStateError("edit requires old_string and new_string")
+            count = text.count(old)
+            if count == 0:
+                raise ValueError(f"old_string not found in {op.path!r}")
+            if count > 1 and not op.replace_all:
+                raise ValueError(
+                    f"old_string found {count} times in {op.path!r}; "
+                    f"set replace_all=True or make the match unique"
+                )
+            return text.replace(old, new) if op.replace_all else text.replace(old, new, 1)
+
+        # INSERT
+        anchor = op.anchor
+        if anchor is None or op.content is None:
+            raise ExecutorStateError("insert requires anchor and content")
+        count = text.count(anchor)
+        if count == 0:
+            raise ValueError(f"anchor not found in {op.path!r}")
+        if count > 1:
+            raise ValueError(
+                f"anchor found {count} times in {op.path!r}; make the anchor unique"
+            )
+        if op.position == "before":
+            return text.replace(anchor, op.content + anchor, 1)
+        return text.replace(anchor, anchor + op.content, 1)
+
     # ── Commit ────────────────────────────────────────────────────────────────
 
     def _commit(self, p: _Pending) -> None:
         op = p.operation
-        if op.type in (OperationType.CREATE, OperationType.WRITE):
+        if op.type in (
+            OperationType.CREATE,
+            OperationType.WRITE,
+            OperationType.EDIT,
+            OperationType.INSERT,
+        ):
             if p.temp_path is None:
                 raise ExecutorStateError("temp_path missing")
             os.replace(p.temp_path, op.path)  # atomic on POSIX
@@ -177,7 +248,12 @@ class _Executor:
                 continue
             op = p.operation
             try:
-                if op.type in (OperationType.CREATE, OperationType.WRITE):
+                if op.type in (
+                    OperationType.CREATE,
+                    OperationType.WRITE,
+                    OperationType.EDIT,
+                    OperationType.INSERT,
+                ):
                     if p.backup_path and os.path.exists(p.backup_path):
                         os.replace(p.backup_path, op.path)
                         p.backup_path = None

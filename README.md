@@ -253,12 +253,41 @@ operations:
 
 ### Operation types
 
-| Type     | Required fields        | Description                        |
-|----------|------------------------|------------------------------------|
-| `create` | `path`, `content`      | Create a new file                  |
-| `write`  | `path`, `content`      | Overwrite an existing file         |
-| `delete` | `path`                 | Delete a file                      |
-| `move`   | `path`, `destination`  | Move or rename a file              |
+| Type     | Required fields                   | Description                                 |
+|----------|-----------------------------------|---------------------------------------------|
+| `create` | `path`, `content`                 | Create a new file                           |
+| `write`  | `path`, `content`                 | Overwrite an existing file                  |
+| `delete` | `path`                            | Delete a file                               |
+| `move`   | `path`, `destination`             | Move or rename a file                       |
+| `edit`   | `path`, `old_string`, `new_string`| Replace exact text in an existing file      |
+| `insert` | `path`, `anchor`, `position`, `content` | Insert text `before`/`after` an anchor |
+
+#### Surgical edits: `edit` and `insert`
+
+`edit` and `insert` change part of a file without restating the whole thing — useful for wiring a line into many files in one atomic batch.
+
+```json
+{
+  "operations": [
+    { "type": "edit", "path": "index.html",
+      "old_string": "<a href=\"a.html\">A</a>",
+      "new_string": "<a href=\"a.html\">A</a>\n<a href=\"b.html\">B</a>" },
+    { "type": "edit", "path": "config.py", "old_string": "DEBUG = True",
+      "new_string": "DEBUG = False", "replace_all": false },
+    { "type": "insert", "path": "nav.html", "anchor": "</ul>",
+      "position": "before", "content": "  <li>New</li>\n" }
+  ]
+}
+```
+
+Exact-string matching only (matching the editor's Edit tool — no regex, line numbers, or fuzzy matching). The whole batch fails and rolls back if:
+
+- the `path` does not exist;
+- `old_string` / `anchor` is **not found**;
+- the match is **ambiguous** — found more than once — unless `edit` sets `replace_all: true` (`insert` always requires a unique anchor);
+- an `edit` is a no-op (`old_string == new_string`).
+
+Multiple `edit`/`insert` operations on the **same file** in one batch compose in order, so two edits to one file both land.
 
 ---
 
