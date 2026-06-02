@@ -6,9 +6,12 @@ Uses stdlib unittest only — no external dependencies required.
 import os
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
+from unittest import mock
 
 from fileops.core import execute
+from fileops.core.exceptions import RollbackFailedWarning
 from fileops.core.models import BatchSpec, FileOperation, OperationType
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -226,6 +229,144 @@ class TestRollback(unittest.TestCase):
         # Fails in prepare — nothing committed, so rolled_back is False
         self.assertFalse(result.rolled_back)
         self.assertFalse(os.path.exists(new_file))
+
+
+class TestCommitPhaseRollback(unittest.TestCase):
+    """
+    Failures DURING commit (not prepare) — the tool's core promise.
+
+    These force os.replace to raise on the *second* commit, after the first has
+    already succeeded, so the executor must reverse the committed op and report
+    rolled_back=True. Prepare-phase tests can't reach this path.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def path(self, name):
+        return os.path.join(self.tmp, name)
+
+    def _fail_on_nth_replace(self, n):
+        """Real os.replace, except the n-th call raises OSError."""
+        real = os.replace
+        state = {"calls": 0}
+
+        def flaky(src, dst):
+            state["calls"] += 1
+            if state["calls"] == n:
+                raise OSError("simulated commit failure")
+            return real(src, dst)
+
+        return flaky
+
+    def test_commit_failure_restores_modified_file(self):
+        a = self.path("a.txt")
+        b = self.path("b.txt")
+        Path(a).write_text("a_original")
+        Path(b).write_text("b_original")
+
+        # Commit order: replace(a) succeeds (#1), replace(b) fails (#2),
+        # then rollback's replace(backup_a -> a) runs (#3, real).
+        with mock.patch("fileops.core.executor.os.replace",
+                        side_effect=self._fail_on_nth_replace(2)):
+            result = execute(spec(op_write(a, "a_new"), op_write(b, "b_new")))
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.rolled_back)
+        self.assertIn("Commit failed", result.error or "")
+        self.assertEqual(Path(a).read_text(), "a_original")  # committed then restored
+        self.assertEqual(Path(b).read_text(), "b_original")  # commit never landed
+
+    def test_commit_failure_removes_created_file(self):
+        new_file = self.path("new.txt")
+        existing = self.path("existing.txt")
+        Path(existing).write_text("orig")
+
+        # CREATE new commits (#1), WRITE existing fails (#2). Rollback must
+        # unlink the newly created file (it has no backup to restore).
+        with mock.patch("fileops.core.executor.os.replace",
+                        side_effect=self._fail_on_nth_replace(2)):
+            result = execute(spec(
+                op_create(new_file, "created"),
+                op_write(existing, "updated"),
+            ))
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.rolled_back)
+        self.assertFalse(os.path.exists(new_file))      # created then removed
+        self.assertEqual(Path(existing).read_text(), "orig")
+
+    def test_commit_failure_leaves_no_temp_files(self):
+        a = self.path("a.txt")
+        b = self.path("b.txt")
+        Path(a).write_text("a_original")
+        Path(b).write_text("b_original")
+        with mock.patch("fileops.core.executor.os.replace",
+                        side_effect=self._fail_on_nth_replace(2)):
+            execute(spec(op_write(a, "a_new"), op_write(b, "b_new")))
+        leftovers = [f for f in os.listdir(self.tmp) if f.startswith(".fileops_")]
+        self.assertEqual(leftovers, [])
+
+
+class TestRollbackFailure(unittest.TestCase):
+    """When rollback itself can't complete, the executor must warn, not crash."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def path(self, name):
+        return os.path.join(self.tmp, name)
+
+    def test_rollback_failure_emits_warning(self):
+        a = self.path("a.txt")
+        b = self.path("b.txt")
+        Path(a).write_text("a_original")
+        Path(b).write_text("b_original")
+
+        real = os.replace
+        state = {"calls": 0}
+
+        def flaky(src, dst):
+            state["calls"] += 1
+            # #1 commit a succeeds; #2 commit b fails; #3 (rollback restore a) also fails.
+            if state["calls"] >= 2:
+                raise OSError("simulated failure")
+            return real(src, dst)
+
+        with mock.patch("fileops.core.executor.os.replace", side_effect=flaky):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = execute(spec(op_write(a, "a_new"), op_write(b, "b_new")))
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.rolled_back)
+        self.assertTrue(
+            any(issubclass(w.category, RollbackFailedWarning) for w in caught),
+            "expected a RollbackFailedWarning when rollback can't restore a file",
+        )
+
+
+@unittest.skipIf(getattr(os, "geteuid", lambda: 1)() == 0,
+                 "running as root bypasses directory permissions")
+class TestUnwritableDirectory(unittest.TestCase):
+    """A write into a read-only directory must fail in prepare and change nothing."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def test_unwritable_dir_fails_cleanly(self):
+        ro_dir = os.path.join(self.tmp, "readonly")
+        os.makedirs(ro_dir)
+        existing = os.path.join(ro_dir, "f.txt")
+        Path(existing).write_text("orig")
+        os.chmod(ro_dir, 0o500)  # r-x: can read, cannot create temp/backup files
+        try:
+            result = execute(spec(op_write(existing, "new content")))
+            self.assertFalse(result.success)
+            self.assertFalse(result.rolled_back)            # failed in prepare
+            self.assertEqual(Path(existing).read_text(), "orig")
+        finally:
+            os.chmod(ro_dir, 0o700)  # restore so tearDown/cleanup can remove it
 
 
 class TestTempFileCleanup(unittest.TestCase):

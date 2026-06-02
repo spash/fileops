@@ -182,6 +182,41 @@ class TestSameFileComposition(unittest.TestCase):
         self.assertEqual(Path(target).read_text(), "alpha\n")
 
 
+class TestBinaryFiles(unittest.TestCase):
+    """EDIT/INSERT on a non-UTF-8 file must fail cleanly, not corrupt it."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def path(self, name):
+        return os.path.join(self.tmp, name)
+
+    def _write_binary(self, name):
+        target = self.path(name)
+        Path(target).write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00\rIHDR\xff\xfe")
+        return target
+
+    def test_edit_binary_fails_and_does_not_corrupt(self):
+        target = self._write_binary("img.bin")
+        original = Path(target).read_bytes()
+        result = execute(spec(op_edit(target, "x", "y")))
+        self.assertFalse(result.success)
+        self.assertEqual(Path(target).read_bytes(), original)
+
+    def test_insert_binary_fails_and_does_not_corrupt(self):
+        target = self._write_binary("img.bin")
+        original = Path(target).read_bytes()
+        result = execute(spec(op_insert(target, "x", "y", "after")))
+        self.assertFalse(result.success)
+        self.assertEqual(Path(target).read_bytes(), original)
+
+    def test_binary_edit_leaves_no_temp_files(self):
+        target = self._write_binary("img.bin")
+        execute(spec(op_edit(target, "x", "y")))
+        leftovers = [f for f in os.listdir(self.tmp) if f.startswith(".fileops_")]
+        self.assertEqual(leftovers, [])
+
+
 class TestMixedBatchRollback(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
