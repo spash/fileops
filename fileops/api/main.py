@@ -18,7 +18,7 @@ from fileops.core.models import BatchResult, BatchSpec
 app = FastAPI(
     title="fileops",
     description="Atomic batch file operations for AI agent workflows.",
-    version="0.1.0",
+    version="0.2.0",
 )
 
 app.add_middleware(
