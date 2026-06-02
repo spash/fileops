@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import tempfile
 import warnings
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ class _Pending:
     temp_path: Optional[str] = None    # staged content (CREATE, WRITE)
     backup_path: Optional[str] = None  # original content (WRITE, DELETE, MOVE dest)
     diff: Optional[str] = None         # computed before commit so dry-run works too
+    mode: Optional[int] = None         # permission bits to stamp on the staged file
     committed: bool = False
 
 
@@ -51,11 +53,28 @@ def execute(spec: BatchSpec) -> BatchResult:
 
 class _Executor:
     def __init__(self) -> None:
-        # In-batch working copy of file text, keyed by absolute path. Lets
-        # successive EDIT/INSERT ops on the same file compose, instead of each
-        # rebuilding from the (unchanging) on-disk snapshot and clobbering the
-        # prior op at commit time (last os.replace() would otherwise win).
+        # In-batch working copy of file text, keyed by absolute path. Seeded by
+        # every content-producing op (CREATE/WRITE/EDIT/INSERT) so that later
+        # EDIT/INSERT ops on the same file compose against the batch's pending
+        # state instead of re-reading the (stale) on-disk snapshot — otherwise a
+        # WRITE followed by an EDIT to the same file would have the EDIT build
+        # from old disk text and the last os.replace() would silently drop the
+        # WRITE's content.
         self._working: dict[str, str] = {}
+        # Permission bits to preserve per path. mkstemp() creates temp files as
+        # 0600; without this the committed file would lose the original's mode
+        # (e.g. an executable script's +x bit). Captured once per path so a
+        # same-file chain stamps a consistent mode.
+        self._modes: dict[str, int] = {}
+        # Directories this batch created via makedirs, so rollback / dry-run can
+        # remove the ones it made (only if still empty) — makedirs side effects
+        # would otherwise survive a rollback and break the "all or nothing".
+        self._created_dirs: list[str] = []
+        # Snapshot the process umask so newly created files honor it (like a
+        # normal open(path, "w")) rather than inheriting mkstemp's 0600.
+        umask = os.umask(0)
+        os.umask(umask)
+        self._umask = umask
 
     def run(self, spec: BatchSpec) -> BatchResult:
         pending: list[_Pending] = []
@@ -67,6 +86,7 @@ class _Executor:
                 pending.append(p)
         except Exception as exc:
             self._cleanup(pending)
+            self._remove_created_dirs()
             return BatchResult(
                 success=False,
                 results=[],
@@ -81,28 +101,52 @@ class _Executor:
                 for p in pending
             ]
             self._cleanup(pending)
+            self._remove_created_dirs()
             return BatchResult(success=True, results=results)
 
         # ── Phase 2: Commit ───────────────────────────────────────────────────
-        results: list[OperationResult] = []
-        try:
-            for p in pending:
+        failed_index: Optional[int] = None
+        commit_error: Optional[str] = None
+        for i, p in enumerate(pending):
+            try:
                 self._commit(p)
                 p.committed = True
-                results.append(
-                    OperationResult(operation=p.operation, success=True, diff=p.diff)
-                )
-        except Exception as exc:
+            except Exception as exc:
+                failed_index = i
+                commit_error = str(exc)
+                break
+
+        if failed_index is not None:
             self._rollback(pending)
+            # Report honestly: every op is now un-applied. The ops that committed
+            # before the failure were reversed, the failing op carries its error,
+            # and the rest were never attempted. None of them succeeded.
+            results = []
+            for i, p in enumerate(pending):
+                if i < failed_index:
+                    err = "rolled back after a later operation failed"
+                elif i == failed_index:
+                    err = commit_error
+                else:
+                    err = "not attempted (batch aborted)"
+                results.append(
+                    OperationResult(
+                        operation=p.operation, success=False, diff=p.diff, error=err
+                    )
+                )
             return BatchResult(
                 success=False,
                 results=results,
                 rolled_back=True,
-                error=f"Commit failed: {exc}",
+                error=f"Commit failed: {commit_error}",
             )
 
         # ── Phase 3: Clean up backups ─────────────────────────────────────────
         self._cleanup_backups(pending)
+        results = [
+            OperationResult(operation=p.operation, success=True, diff=p.diff)
+            for p in pending
+        ]
         return BatchResult(success=True, results=results)
 
     # ── Preparation ───────────────────────────────────────────────────────────
@@ -110,53 +154,52 @@ class _Executor:
     def _prepare(self, op: FileOperation) -> _Pending:
         p = _Pending(operation=op)
         path = op.path
+        abspath = os.path.abspath(path)
 
         if op.type == OperationType.CREATE:
             if os.path.exists(path):
                 raise FileExistsError(f"Cannot create: {path!r} already exists")
-            dir_path = os.path.dirname(os.path.abspath(path))
-            os.makedirs(dir_path, exist_ok=True)
+            dir_path = os.path.dirname(abspath)
+            self._makedirs_tracked(dir_path)
             p.diff = compute_diff(op)
-            fd, temp = tempfile.mkstemp(dir=dir_path, prefix=".fileops_tmp_")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(op.content or "")
-            p.temp_path = temp
+            p.mode = self._resolve_mode(abspath, path)
+            self._working[abspath] = op.content or ""
+            p.temp_path = self._stage(dir_path, op.content or "")
 
         elif op.type == OperationType.WRITE:
-            dir_path = os.path.dirname(os.path.abspath(path))
-            os.makedirs(dir_path, exist_ok=True)
+            dir_path = os.path.dirname(abspath)
+            self._makedirs_tracked(dir_path)
             p.diff = compute_diff(op)
+            p.mode = self._resolve_mode(abspath, path)
             if os.path.exists(path):
                 p.backup_path = self._make_backup(path, dir_path)
-            fd, temp = tempfile.mkstemp(dir=dir_path, prefix=".fileops_tmp_")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(op.content or "")
-            p.temp_path = temp
+            self._working[abspath] = op.content or ""
+            p.temp_path = self._stage(dir_path, op.content or "")
 
         elif op.type in (OperationType.EDIT, OperationType.INSERT):
-            # EDIT/INSERT derive new content from the existing file, then ride
-            # the same temp-file + os.replace() staging path as WRITE.
-            abspath = os.path.abspath(path)
-            if not os.path.exists(path):
+            # EDIT/INSERT derive new content from the existing file (or this
+            # batch's pending state), then ride the same temp-file +
+            # os.replace() staging path as WRITE.
+            in_batch = abspath in self._working
+            if not in_batch and not os.path.exists(path):
                 raise FileNotFoundError(f"Cannot edit non-existent path: {path!r}")
             dir_path = os.path.dirname(abspath)
-            # Build on this batch's prior edits to the same file, if any.
-            before = self._working[abspath] if abspath in self._working else self._read_text(path)
+            before = self._working[abspath] if in_batch else self._read_text(path)
             after = self._apply_string_op(op, before)
             p.diff = diff_strings(path, before, after)
+            p.mode = self._resolve_mode(abspath, path)
             self._working[abspath] = after
-            # Each op backs up the on-disk original (unchanged during prepare),
-            # so rollback restores the original regardless of commit order.
-            p.backup_path = self._make_backup(path, dir_path)
-            fd, temp = tempfile.mkstemp(dir=dir_path, prefix=".fileops_tmp_")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(after)
-            p.temp_path = temp
+            # Back up the on-disk original only if there is one. If a prior op in
+            # this batch created the file, it isn't on disk yet — rollback will
+            # remove it rather than restore a backup.
+            if os.path.exists(path):
+                p.backup_path = self._make_backup(path, dir_path)
+            p.temp_path = self._stage(dir_path, after)
 
         elif op.type == OperationType.DELETE:
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Cannot delete non-existent path: {path!r}")
-            dir_path = os.path.dirname(os.path.abspath(path))
+            dir_path = os.path.dirname(abspath)
             p.diff = compute_diff(op)
             p.backup_path = self._make_backup(path, dir_path)
 
@@ -167,17 +210,55 @@ class _Executor:
             if dest is None:
                 raise ExecutorStateError("destination missing")
             dest_dir = os.path.dirname(os.path.abspath(dest))
-            os.makedirs(dest_dir, exist_ok=True)
+            self._makedirs_tracked(dest_dir)
             if os.path.exists(dest):
                 p.backup_path = self._make_backup(dest, dest_dir)
 
         return p
 
+    def _stage(self, dir_path: str, content: str) -> str:
+        """Write ``content`` to a temp file in ``dir_path`` and return its path."""
+        fd, temp = tempfile.mkstemp(dir=dir_path, prefix=".fileops_tmp_")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        return temp
+
     def _make_backup(self, path: str, dir_path: str) -> str:
         fd, backup = tempfile.mkstemp(dir=dir_path, prefix=".fileops_bak_")
         os.close(fd)
-        shutil.copy2(path, backup)
+        shutil.copy2(path, backup)  # copy2 preserves mode for accurate rollback
         return backup
+
+    def _resolve_mode(self, abspath: str, path: str) -> int:
+        """
+        Permission bits the committed file should carry. Captured once per path
+        (and reused across a same-file chain): the on-disk mode for an existing
+        file, or the umask-respecting default for a newly created one.
+        """
+        if abspath in self._modes:
+            return self._modes[abspath]
+        if os.path.exists(path):
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        else:
+            mode = 0o666 & ~self._umask
+        self._modes[abspath] = mode
+        return mode
+
+    def _makedirs_tracked(self, dir_path: str) -> None:
+        """makedirs(dir_path), recording any directories we actually create."""
+        target = os.path.abspath(dir_path)
+        missing: list[str] = []
+        cur = target
+        while cur and not os.path.exists(cur):
+            missing.append(cur)
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        os.makedirs(target, exist_ok=True)
+        for d in missing:
+            if d not in self._created_dirs:
+                self._created_dirs.append(d)
 
     def _read_text(self, path: str) -> str:
         try:
@@ -230,6 +311,13 @@ class _Executor:
         ):
             if p.temp_path is None:
                 raise ExecutorStateError("temp_path missing")
+            if p.mode is not None:
+                # Best-effort: preserve the original/umask mode. Never let a mode
+                # failure abort an otherwise-valid commit.
+                try:
+                    os.chmod(p.temp_path, p.mode)
+                except OSError:
+                    pass
             os.replace(p.temp_path, op.path)  # atomic on POSIX
             p.temp_path = None
         elif op.type == OperationType.DELETE:
@@ -282,6 +370,7 @@ class _Executor:
                 )
 
         self._cleanup(pending)
+        self._remove_created_dirs()
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
@@ -304,3 +393,12 @@ class _Executor:
                     os.unlink(p.backup_path)
                 except OSError:
                     pass
+
+    def _remove_created_dirs(self) -> None:
+        """Remove directories this batch created, deepest first, only if empty."""
+        for d in sorted(set(self._created_dirs), key=len, reverse=True):
+            try:
+                os.rmdir(d)
+            except OSError:
+                pass  # not empty (holds a committed file) or already gone
+        self._created_dirs.clear()

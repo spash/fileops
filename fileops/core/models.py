@@ -68,6 +68,11 @@ class FileOperation(BaseModel):
 
 
 class BatchSpec(BaseModel):
+    # Reject unknown top-level keys so a typo'd flag (e.g. "drz_run") can't be
+    # silently swallowed and cause a batch to execute when the caller meant to
+    # preview it. Mirrors FileOperation's extra="forbid".
+    model_config = ConfigDict(extra="forbid")
+
     operations: list[FileOperation] = Field(min_length=1)
     description: Optional[str] = None
     dry_run: bool = False
