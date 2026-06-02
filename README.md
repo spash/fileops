@@ -53,17 +53,15 @@ One call. One result. No partial states.
 
 ## Install
 
-```bash
-pip install fileops
-```
-
-Or from source:
+From source:
 
 ```bash
-git clone https://github.com/spash/tool-example
-cd tool-example
+git clone https://github.com/spash/fileops
+cd fileops
 pip install -e .
 ```
+
+> **Editable install + Python 3.14 on macOS:** if `import fileops` works inside the repo but fails with `ModuleNotFoundError` elsewhere, the editable `.pth` file in `site-packages` likely has macOS's *hidden* flag set, which Python 3.14's `site` module skips. Clear it with `chflags nohidden <venv>/lib/pythonX.Y/site-packages/__editable__*fileops*.pth`, or use a regular `pip install .`.
 
 ---
 
@@ -334,8 +332,8 @@ claude --output-format json "Refactor auth.py to use DI" \
 ## Development
 
 ```bash
-git clone https://github.com/spash/tool-example
-cd tool-example
+git clone https://github.com/spash/fileops
+cd fileops
 pip install -e ".[dev]"
 python -m unittest discover -s tests -v
 ruff check .
