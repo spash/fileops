@@ -15,6 +15,8 @@ even when the destination already exists (POSIX rename(2) semantics).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import shutil
 import stat
@@ -153,7 +155,20 @@ class _Executor:
     # ── Preparation ───────────────────────────────────────────────────────────
 
     def _prepare(self, op: FileOperation) -> _Pending:
+        # Wrap the dispatch so that if preparing one op fails partway through
+        # (e.g. a backup was made before the diff step raised), that op's own
+        # temp/backup artifacts are cleaned up — they aren't tracked in `pending`
+        # yet, so run()'s cleanup wouldn't otherwise reach them.
         p = _Pending(operation=op)
+        try:
+            self._prepare_op(p)
+        except Exception:
+            self._cleanup([p])
+            raise
+        return p
+
+    def _prepare_op(self, p: _Pending) -> None:
+        op = p.operation
         path = op.path
         abspath = os.path.abspath(path)
 
@@ -163,21 +178,17 @@ class _Executor:
                 raise FileExistsError(f"Cannot create: {path!r} already exists")
             dir_path = os.path.dirname(abspath)
             self._makedirs_tracked(dir_path)
-            p.diff = compute_diff(op)
             p.mode = self._resolve_mode(abspath, path)
-            self._working[abspath] = op.content or ""
-            p.temp_path = self._stage(dir_path, op.content or "")
+            p.temp_path = self._stage_content(op, abspath, dir_path, p)
 
         elif op.type == OperationType.WRITE:
             self._reject_symlink(path)
             dir_path = os.path.dirname(abspath)
             self._makedirs_tracked(dir_path)
-            p.diff = compute_diff(op)
             p.mode = self._resolve_mode(abspath, path)
             if os.path.exists(path):
                 p.backup_path = self._make_backup(path, dir_path)
-            self._working[abspath] = op.content or ""
-            p.temp_path = self._stage(dir_path, op.content or "")
+            p.temp_path = self._stage_content(op, abspath, dir_path, p)
 
         elif op.type in (OperationType.EDIT, OperationType.INSERT):
             # EDIT/INSERT derive new content from the existing file (or this
@@ -221,16 +232,46 @@ class _Executor:
             if os.path.exists(dest):
                 p.backup_path = self._make_backup(dest, dest_dir)
 
-        return p
+    def _stage_content(
+        self, op: FileOperation, abspath: str, dir_path: str, p: _Pending
+    ) -> str:
+        """
+        Stage a CREATE/WRITE's content (text or base64-decoded bytes) and set its
+        diff. Text content also seeds the in-batch working view so later
+        EDIT/INSERT ops compose; binary content does not (it isn't text-editable).
+        """
+        if op.content_encoding == "base64":
+            data = self._decode_base64(op)
+            p.diff = f"(binary file, {len(data)} bytes)"
+            return self._stage_bytes(dir_path, data)
+        text = op.content or ""
+        p.diff = compute_diff(op)
+        self._working[abspath] = text
+        return self._stage(dir_path, text)
+
+    def _decode_base64(self, op: FileOperation) -> bytes:
+        try:
+            return base64.b64decode(op.content or "", validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(f"invalid base64 content for {op.path!r}: {exc}")
 
     def _stage(self, dir_path: str, content: str) -> str:
-        """Write ``content`` to a temp file in ``dir_path`` and return its path."""
+        """Write text ``content`` to a temp file in ``dir_path`` and return it."""
         fd, temp = tempfile.mkstemp(dir=dir_path, prefix=".fileops_tmp_")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
             # Flush data to disk before the commit-phase os.replace so a crash
             # can't leave a renamed-but-empty file. The directory entry is fsync'd
             # separately after the rename (see _fsync_dir).
+            f.flush()
+            os.fsync(f.fileno())
+        return temp
+
+    def _stage_bytes(self, dir_path: str, data: bytes) -> str:
+        """Write raw ``data`` to a temp file in ``dir_path`` and return it."""
+        fd, temp = tempfile.mkstemp(dir=dir_path, prefix=".fileops_tmp_")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
             f.flush()
             os.fsync(f.fileno())
         return temp

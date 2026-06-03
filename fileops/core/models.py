@@ -8,7 +8,7 @@ Changing these is a breaking change; changing implementations is not.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_serializer, model_validator
 
@@ -34,12 +34,20 @@ class FileOperation(BaseModel):
     replace_all: bool = False           # EDIT: replace every occurrence
     anchor: Optional[str] = None        # required for INSERT — text to locate
     position: Optional[str] = None      # required for INSERT — "before" | "after"
+    # CREATE/WRITE only. "base64" decodes `content` to raw bytes, so binary
+    # files (images, archives) can be written. Default (None) = UTF-8 text.
+    content_encoding: Optional[Literal["base64"]] = None
 
     @model_validator(mode="after")
     def _validate_fields(self) -> FileOperation:
         if self.type in (OperationType.CREATE, OperationType.WRITE):
             if self.content is None:
                 raise ValueError(f"'{self.type.value}' operation requires 'content'")
+        if self.content_encoding is not None and self.type not in (
+            OperationType.CREATE,
+            OperationType.WRITE,
+        ):
+            raise ValueError("'content_encoding' is only valid for create/write operations")
         if self.type == OperationType.MOVE:
             if not self.destination:
                 raise ValueError("'move' operation requires 'destination'")
