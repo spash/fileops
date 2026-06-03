@@ -117,6 +117,7 @@ class _Executor:
                 break
 
         if failed_index is not None:
+            assert commit_error is not None  # set together with failed_index
             self._rollback(pending)
             # Report honestly: every op is now un-applied. The ops that committed
             # before the failure were reversed, the failing op carries its error,

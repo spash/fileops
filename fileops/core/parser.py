@@ -27,7 +27,7 @@ except ImportError:
     _YAML_AVAILABLE = False
 
 
-def load_spec(source: Union[str, IO[str], dict]) -> BatchSpec:
+def load_spec(source: Union[str, IO[str], dict[str, Any]]) -> BatchSpec:
     """
     Parse a BatchSpec from a file path, file-like object, or raw dict.
 
@@ -93,7 +93,7 @@ def _load_yaml(content: str) -> Any:
     return yaml.safe_load(content)
 
 
-def _parse_dict(data: dict) -> BatchSpec:
+def _parse_dict(data: dict[str, Any]) -> BatchSpec:
     if not isinstance(data, dict):
         raise ValueError(f"Spec must be a mapping, got {type(data).__name__}")
     try:

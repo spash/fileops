@@ -8,7 +8,7 @@ Changing these is a breaking change; changing implementations is not.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_serializer, model_validator
 
@@ -89,7 +89,7 @@ class OperationResult(BaseModel):
     error: Optional[str] = None
 
     @model_serializer
-    def _serialize(self) -> dict:
+    def _serialize(self) -> dict[str, Any]:
         return {
             "type": self.operation.type.value,
             "path": self.operation.path,
@@ -106,12 +106,14 @@ class BatchResult(BaseModel):
     rolled_back: bool = False
     error: Optional[str] = None
 
-    @computed_field
+    # mypy doesn't support stacking @property under another decorator
+    # (python/mypy#14461); pydantic's plugin handles the runtime semantics.
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def operation_count(self) -> int:
         return len(self.results)
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def success_count(self) -> int:
         return sum(1 for r in self.results if r.success)

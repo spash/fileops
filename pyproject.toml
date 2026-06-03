@@ -16,7 +16,13 @@ cli = ["click>=8.1"]
 api = ["fastapi>=0.111", "uvicorn[standard]>=0.29"]
 yaml = ["pyyaml>=6.0"]
 all = ["fileops[cli,api,yaml]"]
-dev = ["ruff>=0.4"]
+dev = [
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "fileops[all]",
+]
 
 [project.scripts]
 fileops = "fileops.cli.main:main"
@@ -31,3 +37,19 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+# Third-party deps without type stubs we don't want to fail the strict gate on.
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["fileops"]
+branch = true
