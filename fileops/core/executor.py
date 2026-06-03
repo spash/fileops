@@ -157,6 +157,7 @@ class _Executor:
         abspath = os.path.abspath(path)
 
         if op.type == OperationType.CREATE:
+            self._reject_symlink(path)
             if os.path.exists(path):
                 raise FileExistsError(f"Cannot create: {path!r} already exists")
             dir_path = os.path.dirname(abspath)
@@ -167,6 +168,7 @@ class _Executor:
             p.temp_path = self._stage(dir_path, op.content or "")
 
         elif op.type == OperationType.WRITE:
+            self._reject_symlink(path)
             dir_path = os.path.dirname(abspath)
             self._makedirs_tracked(dir_path)
             p.diff = compute_diff(op)
@@ -180,6 +182,7 @@ class _Executor:
             # EDIT/INSERT derive new content from the existing file (or this
             # batch's pending state), then ride the same temp-file +
             # os.replace() staging path as WRITE.
+            self._reject_symlink(path)
             in_batch = abspath in self._working
             if not in_batch and not os.path.exists(path):
                 raise FileNotFoundError(f"Cannot edit non-existent path: {path!r}")
@@ -197,6 +200,7 @@ class _Executor:
             p.temp_path = self._stage(dir_path, after)
 
         elif op.type == OperationType.DELETE:
+            self._reject_symlink(path)
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Cannot delete non-existent path: {path!r}")
             dir_path = os.path.dirname(abspath)
@@ -204,11 +208,13 @@ class _Executor:
             p.backup_path = self._make_backup(path, dir_path)
 
         elif op.type == OperationType.MOVE:
+            self._reject_symlink(path)
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Cannot move non-existent path: {path!r}")
             dest = op.destination
             if dest is None:
                 raise ExecutorStateError("destination missing")
+            self._reject_symlink(dest)
             dest_dir = os.path.dirname(os.path.abspath(dest))
             self._makedirs_tracked(dest_dir)
             if os.path.exists(dest):
@@ -221,7 +227,25 @@ class _Executor:
         fd, temp = tempfile.mkstemp(dir=dir_path, prefix=".fileops_tmp_")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
+            # Flush data to disk before the commit-phase os.replace so a crash
+            # can't leave a renamed-but-empty file. The directory entry is fsync'd
+            # separately after the rename (see _fsync_dir).
+            f.flush()
+            os.fsync(f.fileno())
         return temp
+
+    def _reject_symlink(self, path: str) -> None:
+        """
+        Refuse to operate on a symlink. Operating on one is ambiguous and unsafe:
+        os.replace would silently swap the link for a regular file (losing the
+        link and never touching its target), while a backup+restore would follow
+        the link and corrupt it on rollback. Callers should target the real path.
+        """
+        if os.path.islink(path):
+            raise ValueError(
+                f"Refusing to operate on symlink {path!r}; symlinks are not "
+                f"followed. Target the real path instead."
+            )
 
     def _make_backup(self, path: str, dir_path: str) -> str:
         fd, backup = tempfile.mkstemp(dir=dir_path, prefix=".fileops_bak_")
@@ -320,12 +344,35 @@ class _Executor:
                     pass
             os.replace(p.temp_path, op.path)  # atomic on POSIX
             p.temp_path = None
+            self._fsync_dir(op.path)
         elif op.type == OperationType.DELETE:
             os.unlink(op.path)
+            self._fsync_dir(op.path)
         elif op.type == OperationType.MOVE:
             if op.destination is None:
                 raise ExecutorStateError("destination missing")
             os.replace(op.path, op.destination)  # atomic on POSIX, same fs
+            # Both directory entries changed: the new name and the removed source.
+            self._fsync_dir(op.destination)
+            self._fsync_dir(op.path)
+
+    def _fsync_dir(self, path: str) -> None:
+        """
+        fsync the directory containing ``path`` so a rename/unlink survives a
+        crash. Best-effort: a platform that can't fsync a directory (or a
+        transient error) must not abort an otherwise-committed operation.
+        """
+        directory = os.path.dirname(os.path.abspath(path))
+        try:
+            dirfd = os.open(directory, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dirfd)
+        except OSError:
+            pass
+        finally:
+            os.close(dirfd)
 
     # ── Rollback ──────────────────────────────────────────────────────────────
 
