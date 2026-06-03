@@ -163,6 +163,19 @@ curl -X POST http://localhost:8000/dry-run \
 
 Interactive docs at `http://localhost:8000/docs`.
 
+### Hardening the server
+
+The server executes operations on whatever paths a request names. Whenever it is reachable by anything but the local user, confine it:
+
+| Environment variable  | Effect                                                                                           |
+|-----------------------|--------------------------------------------------------------------------------------------------|
+| `FILEOPS_ROOT`        | Every operation path (and `move` destination) must resolve inside this directory, else **403**.  |
+| `FILEOPS_CORS_ORIGINS`| Comma-separated allowed CORS origins (default `*`).                                               |
+
+```bash
+FILEOPS_ROOT=/srv/workspace uvicorn fileops.api.main:app
+```
+
 ---
 
 ## Python library
@@ -206,6 +219,10 @@ backup → /tmp/.fileops_bak_xyz                             os.replace(backup, 
 ```
 
 No temp files are left behind; cleanup runs on both success and failure paths.
+
+**Durability:** staged data is `fsync`'d before the rename, and the parent directory is `fsync`'d after, so a crash can't leave a renamed-but-empty file or a lost rename. File permission bits are preserved across `write`/`edit`/`insert`; newly created files honor the process umask.
+
+**Symlinks are refused:** operating on a symlinked target (any operation, including a `move` source or destination) fails rather than silently replacing the link with a regular file. Target the real path instead.
 
 > **Same-filesystem requirement:** fileops writes temp files into the same directory as the target to guarantee they share a filesystem with the destination. Cross-device moves fall back to a copy-then-delete.
 
@@ -259,6 +276,8 @@ operations:
 | `move`   | `path`, `destination`             | Move or rename a file                       |
 | `edit`   | `path`, `old_string`, `new_string`| Replace exact text in an existing file      |
 | `insert` | `path`, `anchor`, `position`, `content` | Insert text `before`/`after` an anchor |
+
+`create` and `write` also accept an optional `content_encoding: "base64"`, which decodes `content` to raw bytes so binary files (images, archives) can be written instead of UTF-8 text.
 
 #### Surgical edits: `edit` and `insert`
 

@@ -27,7 +27,7 @@ from fileops.core.models import BatchResult, BatchSpec
 app = FastAPI(
     title="fileops",
     description="Atomic batch file operations for AI agent workflows.",
-    version="0.3.0",
+    version="0.4.0",
 )
 
 _cors_env = os.environ.get("FILEOPS_CORS_ORIGINS")
