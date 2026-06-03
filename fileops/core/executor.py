@@ -260,9 +260,12 @@ class _Executor:
         fd, temp = tempfile.mkstemp(dir=dir_path, prefix=".fileops_tmp_")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
-            # Flush data to disk before the commit-phase os.replace so a crash
-            # can't leave a renamed-but-empty file. The directory entry is fsync'd
-            # separately after the rename (see _fsync_dir).
+            # Flush data before the commit-phase os.replace so a process/OS crash
+            # can't leave the rename pointing at an unflushed (empty/garbage)
+            # file. This buys crash-consistency, not guaranteed durability across
+            # sudden power loss — that needs a full hardware flush (F_FULLFSYNC on
+            # macOS), which costs ~50x and is outside this tool's threat model.
+            # The directory entry is fsync'd separately after the rename.
             f.flush()
             os.fsync(f.fileno())
         return temp
@@ -400,9 +403,10 @@ class _Executor:
 
     def _fsync_dir(self, path: str) -> None:
         """
-        fsync the directory containing ``path`` so a rename/unlink survives a
-        crash. Best-effort: a platform that can't fsync a directory (or a
-        transient error) must not abort an otherwise-committed operation.
+        fsync the directory containing ``path`` so the rename/unlink survives a
+        process/OS crash (crash-consistency, not power-loss durability).
+        Best-effort: a platform that can't fsync a directory (or a transient
+        error) must not abort an otherwise-committed operation.
         """
         directory = os.path.dirname(os.path.abspath(path))
         try:

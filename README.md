@@ -220,7 +220,7 @@ backup → /tmp/.fileops_bak_xyz                             os.replace(backup, 
 
 No temp files are left behind; cleanup runs on both success and failure paths.
 
-**Durability:** staged data is `fsync`'d before the rename, and the parent directory is `fsync`'d after, so a crash can't leave a renamed-but-empty file or a lost rename. File permission bits are preserved across `write`/`edit`/`insert`; newly created files honor the process umask.
+**Crash-consistency:** staged data is `fsync`'d before the rename, and the parent directory is `fsync`'d after, so a process or OS crash can't leave a renamed-but-empty file or a lost rename. This is crash-*consistency*, not a guarantee of durability across sudden power loss (which would need a full hardware flush, e.g. `F_FULLFSYNC` on macOS — deliberately not done, as it costs ~50x for a failure mode outside this tool's scope). File permission bits are preserved across `write`/`edit`/`insert`; newly created files honor the process umask.
 
 **Symlinks are refused:** operating on a symlinked target (any operation, including a `move` source or destination) fails rather than silently replacing the link with a regular file. Target the real path instead.
 
